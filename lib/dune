@@ -1,0 +1,5 @@
+(library
+ (name autobindgen)
+ (libraries core)
+ (inline_tests)
+ (preprocess (pps ppx_yojson_conv ppx_jane ppx_typed_fields)))

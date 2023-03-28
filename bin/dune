@@ -1,0 +1,4 @@
+(executable
+ (public_name autobindgen)
+ (name main)
+ (libraries core_unix.command_unix autobindgen))
