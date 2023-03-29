@@ -308,7 +308,7 @@ module Control = struct
     type t =
       | Optional
       | Required
-    [@@deriving sexp]
+    [@@deriving sexp, compare]
   end
 
   include T
@@ -342,7 +342,7 @@ module Variance = struct
     type t =
       | Covariant
       | Contravariant
-    [@@deriving sexp]
+    [@@deriving sexp, compare]
   end
 
   include T
@@ -536,19 +536,27 @@ module Parser = struct
 
   module Open_on_rhs = struct
     module type S = sig
+      include module type of Fields
       include Applicative.S with type 'a t := 'a t
 
       val field : (ast, 'a) Fieldslib.Field.readonly_t -> 'a t
 
-      include module type of Fields
+      val list_option_field
+        :  (ast, 'a list option) Fieldslib.Field.readonly_t
+        -> 'a list t
+      val bool_option_field
+        :  (ast, bool option) Fieldslib.Field.readonly_t
+        -> bool t
     end
 
     include (
       struct
-        include A
         include Fields
+        include A
 
         let field x = Field x
+        let list_option_field x = A.map (Field x) ~f:(Option.value ~default:[])
+        let bool_option_field x = A.map (Field x) ~f:(Option.value ~default:false)
       end :
         S)
   end
@@ -621,7 +629,6 @@ let command =
   let%map_open.Command file = anon ("file" %: string) in
   fun () -> load_exn ~file |> to_hierarchy |> List.iter ~f:print_endline
 ;;
-
 
 let parse () =
   try
