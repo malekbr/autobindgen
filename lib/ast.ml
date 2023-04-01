@@ -544,9 +544,8 @@ module Parser = struct
       val list_option_field
         :  (ast, 'a list option) Fieldslib.Field.readonly_t
         -> 'a list t
-      val bool_option_field
-        :  (ast, bool option) Fieldslib.Field.readonly_t
-        -> bool t
+
+      val bool_option_field : (ast, bool option) Fieldslib.Field.readonly_t -> bool t
     end
 
     include (

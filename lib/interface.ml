@@ -16,11 +16,270 @@ let check_kind ?(ignore_fields = []) expected =
 ;;
 
 module Type = struct
+  module Specs = struct
+    module Basic = struct
+      type t =
+        | Char
+        | Short
+        | Int
+        | Long
+        | Long_long
+      [@@deriving sexp_of, compare]
+    end
+
+    module Signedness = struct
+      type t =
+        | Signed
+        | Unsigned
+      [@@deriving sexp_of, compare]
+    end
+
+    type t =
+      | Void
+      | Basic of Signedness.t option * Basic.t
+      | Named of string
+      | Const of t
+      | Pointer of t
+      | Nullability of
+          { nullable : bool
+          ; ty : t
+          }
+      | Struct of string
+      | Enum of string
+      | Instance_type
+      | Type_params of
+          { name : string
+          ; parameters : t list
+          }
+      | Function_pointer of
+          { return_type : t
+          ; arguments : t list
+          }
+      | Block of
+          { return_type : t
+          ; arguments : t list
+          }
+      | Kind_of of t
+      | Deprecated of
+          { message : string
+          ; start_version : string
+          ; end_version : string option
+          ; target : string
+          ; type_ : t
+          }
+    [@@deriving sexp_of, compare, variants]
+  end
+
+  module Token = struct
+    type t =
+      | Signed
+      | Unsigned
+      | Char
+      | Short
+      | Int
+      | Long
+      | Void
+      | Const
+      | Star
+      | Nonnull
+      | Nullable
+      | Struct
+      | Enum
+      | Instance_type
+      | Open_paren
+      | Close_paren
+      | Open_bracket
+      | Close_bracket
+      | Caret
+      | Comma
+      | Kind_of
+      | Deprecated of
+          { message : string
+          ; start_version : string
+          ; end_version : string option
+          ; target : string
+          }
+      | Api_available of
+          { target : string
+          ; version : string
+          }
+      | NS_swift_unavailable_from_async of string
+      | NS_available of
+          { macos : string option
+          ; ios : string option
+          }
+      | Named of string
+    [@@deriving sexp_of, compare]
+
+    module Parser : sig
+      val tokens : t list Angstrom.t
+    end = struct
+      open! Angstrom
+
+      let quoted_string =
+        let%map.Angstrom string =
+          consumed
+            (char '"'
+             *> Angstrom.scan_string `Unescaped (fun state c ->
+                  match state, c with
+                  | `Escaped, _ -> Some `Unescaped
+                  | `Unescaped, '"' -> None
+                  | `Unescaped, '\\' -> Some `Escaped
+                  | `Unescaped, _ -> Some `Unescaped)
+             <* char '"')
+        in
+        Scanf.sscanf string "%S" Fn.id
+      ;;
+
+      let version = consumed (sep_by1 (char '.') (skip_many1 (satisfy Char.is_digit)))
+
+      let underscore_version =
+        consumed (sep_by1 (char '_') (skip_many1 (satisfy Char.is_digit)))
+      ;;
+
+      let call_separator = char ',' <* skip_many (char ' ')
+
+      let deprecated_parser =
+        let%map.Angstrom message =
+          string "API_DEPRECATED(" *> quoted_string <* call_separator
+        and target = take_while1 Char.is_alpha <* char '('
+        and start_version = version <* call_separator
+        and end_version =
+          map version ~f:Option.return
+          <|> string "API_TO_BE_DEPRECATED" *> return None
+          <* string "))"
+        in
+        Deprecated { message; target; start_version; end_version }
+      ;;
+
+      let api_available_parser =
+        let%map.Angstrom target =
+          string "API_AVAILABLE(" *> take_while1 Char.is_alpha <* char '('
+        and version = version <* string "))" in
+        Api_available { target; version }
+      ;;
+
+      let ns_swift_unavailable_from_async_parser =
+        let%map.Angstrom message =
+          string "NS_SWIFT_UNAVAILABLE_FROM_ASYNC(" *> quoted_string <* char ')'
+        in
+        NS_swift_unavailable_from_async message
+      ;;
+
+      let ns_available =
+        let%map.Angstrom macos =
+          string "NS_AVAILABLE(" *> underscore_version <* call_separator
+        and ios = underscore_version <* char ')' in
+        NS_available { macos = Some macos; ios = Some ios }
+      ;;
+
+      let ns_available_mac =
+        let%map.Angstrom macos =
+          string "NS_AVAILABLE_MAC(" *> underscore_version <* char ')'
+        in
+        NS_available { macos = Some macos; ios = None }
+      ;;
+
+      let ns_available_ios =
+        let%map.Angstrom ios =
+          string "NS_AVAILABLE_MAC(" *> underscore_version <* char ')'
+        in
+        NS_available { macos = None; ios = Some ios }
+      ;;
+
+      let valid_mid_char c = Char.equal c '_' || Char.is_alphanum c
+
+      let maybe_type_name =
+        consumed
+          (satisfy (fun c -> Char.equal c '_' || Char.is_alpha c)
+           *> skip_while valid_mid_char)
+      ;;
+
+      let end_of_word =
+        match%bind.Angstrom peek_char with
+        | Some c when valid_mid_char c -> fail "Keyword can't fail with valid character"
+        | _ -> return ()
+      ;;
+
+      let token =
+        choice
+        @@ List.map
+             ~f:(fun (str, v) -> string str *> end_of_word *> return v)
+             [ "signed", Signed
+             ; "unsigned", Unsigned
+             ; "char", Char
+             ; "short", Short
+             ; "int", Int
+             ; "long", Long
+             ; "const", Const
+             ; "void", Void
+             ; "_Nonnull", Nonnull
+             ; "_Nullable", Nullable
+             ; "struct", Struct
+             ; "enum", Enum
+             ; "instancetype", Instance_type
+             ; "__kindof", Kind_of
+             ]
+        @ List.map
+            ~f:(fun (str, v) -> string str *> return v)
+            [ "*", Star
+            ; "(", Open_paren
+            ; ")", Close_paren
+            ; "^", Caret
+            ; ",", Comma
+            ; "<", Open_bracket
+            ; ">", Close_bracket
+            ]
+        @ [ deprecated_parser
+          ; ns_swift_unavailable_from_async_parser
+          ; api_available_parser
+          ; ns_available
+          ; ns_available_mac
+          ; ns_available_ios
+          ; map maybe_type_name ~f:(fun type_name -> Named type_name)
+          ]
+      ;;
+
+      let tokens = sep_by1 (take_while Char.is_whitespace) token
+    end
+
+    let parse input =
+      Angstrom.parse_string Parser.tokens input ~consume:All
+      |> Result.map_error ~f:(fun error ->
+           let parsed_so_far =
+             Angstrom.parse_string Parser.tokens input ~consume:Prefix
+           in
+           Error.create_s
+             [%message
+               "Failed to parse"
+                 (input : string)
+                 (error : string)
+                 (parsed_so_far : (t list, string) Result.t)])
+      |> ok_exn
+    ;;
+  end
+
   (* Parse more later *)
-  type t = string [@@deriving sexp_of, compare]
+  module Parsed = struct
+    type t =
+      { original : string
+      ; tokens : Token.t list
+      }
+    [@@deriving sexp_of, compare]
+
+    let parse original = { original; tokens = Token.parse original }
+  end
+
+  type t =
+    { specified_type : Parsed.t
+    ; desugared_type : Parsed.t option
+    }
+  [@@deriving sexp_of, compare]
 
   let parse { Ast.Type.qualType; desugaredQualType; typeAliasDeclId = _ } =
-    Option.value desugaredQualType ~default:qualType
+    { specified_type = Parsed.parse qualType
+    ; desugared_type = Option.map ~f:Parsed.parse desugaredQualType
+    }
   ;;
 end
 
@@ -481,7 +740,12 @@ module Enum = struct
         List.filter_map inner ~f:(fun t ->
           match t.kind with
           | Some EnumConstantDecl -> Some (`Value (Value.parse t))
-          | Some (EnumExtensibilityAttr | AvailabilityAttr | SwiftNameAttr | SwiftPrivateAttr | NSErrorDomainAttr) -> None
+          | Some
+              ( EnumExtensibilityAttr
+              | AvailabilityAttr
+              | SwiftNameAttr
+              | SwiftPrivateAttr
+              | NSErrorDomainAttr ) -> None
           | Some FlagEnumAttr ->
             Some
               (parse_just_kind
