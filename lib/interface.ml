@@ -16,83 +16,8 @@ let check_kind ?(ignore_fields = []) expected =
 ;;
 
 module Type = struct
-  module Specs = struct
-    module Basic = struct
-      type t =
-        | Char
-        | Short
-        | Int
-        | Long
-        | Long_long
-      [@@deriving sexp_of, compare]
-    end
-
-    module Signedness = struct
-      type t =
-        | Signed
-        | Unsigned
-      [@@deriving sexp_of, compare]
-    end
-
+  module Availability = struct
     type t =
-      | Void
-      | Basic of Signedness.t option * Basic.t
-      | Named of string
-      | Const of t
-      | Pointer of t
-      | Nullability of
-          { nullable : bool
-          ; ty : t
-          }
-      | Struct of string
-      | Enum of string
-      | Instance_type
-      | Type_params of
-          { name : string
-          ; parameters : t list
-          }
-      | Function_pointer of
-          { return_type : t
-          ; arguments : t list
-          }
-      | Block of
-          { return_type : t
-          ; arguments : t list
-          }
-      | Kind_of of t
-      | Deprecated of
-          { message : string
-          ; start_version : string
-          ; end_version : string option
-          ; target : string
-          ; type_ : t
-          }
-    [@@deriving sexp_of, compare, variants]
-  end
-
-  module Token = struct
-    type t =
-      | Signed
-      | Unsigned
-      | Char
-      | Short
-      | Int
-      | Long
-      | Void
-      | Const
-      | Star
-      | Nonnull
-      | Nullable
-      | Struct
-      | Enum
-      | Instance_type
-      | Open_paren
-      | Close_paren
-      | Open_bracket
-      | Close_bracket
-      | Caret
-      | Comma
-      | Kind_of
       | Deprecated of
           { message : string
           ; start_version : string
@@ -108,6 +33,48 @@ module Type = struct
           { macos : string option
           ; ios : string option
           }
+      | Api_unavailable of string list
+    [@@deriving sexp_of, compare]
+  end
+
+  module Token = struct
+    module Basic = struct
+      type t =
+        | Signed
+        | Unsigned
+        | Char
+        | Short
+        | Int
+        | Long
+      [@@deriving sexp_of, compare]
+    end
+
+    type t =
+      | Basic of Basic.t
+      | Void
+      | Const
+      | Star
+      | Nonnull
+      | Nullable
+      | Null_unspecified
+      | Nullable_result
+      | Refined_for_swift
+      | Returns_not_retained
+      | Swift_ui_actor
+      | NS_unavailable
+      | TVOS_prohibited
+      | Struct
+      | Enum
+      | Instance_type
+      | Open_paren
+      | Close_paren
+      | Open_bracket
+      | Close_bracket
+      | Caret
+      | Comma
+      | Kind_of
+      | Returns_inner_pointer
+      | Availability of Availability.t
       | Named of string
     [@@deriving sexp_of, compare]
 
@@ -149,42 +116,54 @@ module Type = struct
           <|> string "API_TO_BE_DEPRECATED" *> return None
           <* string "))"
         in
-        Deprecated { message; target; start_version; end_version }
+        Deprecated { message; target; start_version; end_version } |> Availability
       ;;
 
       let api_available_parser =
         let%map.Angstrom target =
           string "API_AVAILABLE(" *> take_while1 Char.is_alpha <* char '('
         and version = version <* string "))" in
-        Api_available { target; version }
+        Api_available { target; version } |> Availability
       ;;
 
       let ns_swift_unavailable_from_async_parser =
         let%map.Angstrom message =
           string "NS_SWIFT_UNAVAILABLE_FROM_ASYNC(" *> quoted_string <* char ')'
         in
-        NS_swift_unavailable_from_async message
+        NS_swift_unavailable_from_async message |> Availability
       ;;
 
       let ns_available =
         let%map.Angstrom macos =
           string "NS_AVAILABLE(" *> underscore_version <* call_separator
         and ios = underscore_version <* char ')' in
-        NS_available { macos = Some macos; ios = Some ios }
+        NS_available { macos = Some macos; ios = Some ios } |> Availability
       ;;
 
       let ns_available_mac =
         let%map.Angstrom macos =
           string "NS_AVAILABLE_MAC(" *> underscore_version <* char ')'
         in
-        NS_available { macos = Some macos; ios = None }
+        NS_available { macos = Some macos; ios = None } |> Availability
       ;;
 
       let ns_available_ios =
         let%map.Angstrom ios =
           string "NS_AVAILABLE_MAC(" *> underscore_version <* char ')'
         in
-        NS_available { macos = None; ios = Some ios }
+        NS_available { macos = None; ios = Some ios } |> Availability
+      ;;
+
+      let api_unavailable =
+        let%map.Angstrom apis =
+          string "API_UNAVAILABLE("
+          *> sep_by1
+               call_separator
+               (skip_while Char.is_whitespace *> take_while1 Char.is_alpha
+                <* skip_while Char.is_whitespace)
+          <* char ')'
+        in
+        Api_unavailable apis |> Availability
       ;;
 
       let valid_mid_char c = Char.equal c '_' || Char.is_alphanum c
@@ -205,19 +184,27 @@ module Type = struct
         choice
         @@ List.map
              ~f:(fun (str, v) -> string str *> end_of_word *> return v)
-             [ "signed", Signed
-             ; "unsigned", Unsigned
-             ; "char", Char
-             ; "short", Short
-             ; "int", Int
-             ; "long", Long
+             [ "signed", Basic Signed
+             ; "unsigned", Basic Unsigned
+             ; "char", Basic Char
+             ; "short", Basic Short
+             ; "int", Basic Int
+             ; "long", Basic Long
              ; "const", Const
              ; "void", Void
              ; "_Nonnull", Nonnull
              ; "_Nullable", Nullable
+             ; "_Null_unspecified", Null_unspecified
+             ; "_Nullable_result", Nullable_result
+             ; "__TVOS_PROHIBITED", TVOS_prohibited
+             ; "NS_REFINED_FOR_SWIFT", Refined_for_swift
+             ; "NS_SWIFT_UI_ACTOR", Swift_ui_actor
+             ; "NS_UNAVAILABLE", NS_unavailable
+             ; "CF_RETURNS_NOT_RETAINED", Returns_not_retained
              ; "struct", Struct
              ; "enum", Enum
              ; "instancetype", Instance_type
+             ; "NS_RETURNS_INNER_POINTER", Returns_inner_pointer
              ; "__kindof", Kind_of
              ]
         @ List.map
@@ -236,6 +223,7 @@ module Type = struct
           ; ns_available
           ; ns_available_mac
           ; ns_available_ios
+          ; api_unavailable
           ; map maybe_type_name ~f:(fun type_name -> Named type_name)
           ]
       ;;
@@ -259,15 +247,284 @@ module Type = struct
     ;;
   end
 
+  module Specs = struct
+    module Basic = struct
+      type t =
+        | Char
+        | Short
+        | Int
+        | Long
+        | Long_long
+      [@@deriving sexp_of, compare]
+    end
+
+    module Signedness = struct
+      type t =
+        | Signed
+        | Unsigned
+      [@@deriving sexp_of, compare]
+    end
+
+    type t =
+      | Void
+      | Basic of Signedness.t option * Basic.t
+      | Named of string
+      | Const of t
+      | Pointer of t
+      | Nullability of
+          { nullable : bool option (* Change option to unspecified *)
+          ; ty : t
+          }
+      | Nullable_result of t
+      | Refined_for_swift of t
+      | Swift_ui_actor of t
+      | NS_unavailable of t
+      | Returns_not_retained of t
+      | Struct of string
+      | Enum of string
+      | Instance_type
+      | Type_params of
+          { name : string
+          ; parameters : t list
+          }
+      | Prohibited of [ `TVOS ] * t
+      | Function_pointer of
+          { return_type : t
+          ; arguments : t list
+          }
+      | Block of
+          { return_type : t
+          ; arguments : t list
+          }
+      | Kind_of of t
+      | Returns_inner_pointer of t
+    [@@deriving sexp_of, compare, variants]
+  end
+
   (* Parse more later *)
   module Parsed = struct
     type t =
       { original : string
       ; tokens : Token.t list
+      ; specs : Specs.t
+      ; availability : Availability.t option [@sexp.option]
       }
     [@@deriving sexp_of, compare]
 
-    let parse original = { original; tokens = Token.parse original }
+    let basic_of_last_token : Token.Basic.t -> Specs.Signedness.t option * Specs.Basic.t
+      = function
+      | Char -> None, Char
+      | Short -> None, Short
+      | Int -> None, Int
+      | Long -> None, Long
+      | Signed -> Some Signed, Int
+      | Unsigned -> Some Unsigned, Int
+    ;;
+
+    let rec keep_parsing_basic
+      (tokens_rev : Token.t list)
+      ((signs, specs) : Specs.Signedness.t option * Specs.Basic.t)
+      =
+      match tokens_rev with
+      | Basic prefix :: rest ->
+        let raise_unexpected_basic_prefix () =
+          raise_s
+            [%message
+              "Unexpected basic prefix"
+                (prefix : Token.Basic.t)
+                (signs : Specs.Signedness.t option)
+                (specs : Specs.Basic.t)]
+        in
+        let result : Specs.Signedness.t option * Specs.Basic.t =
+          match prefix with
+          | Char | Int -> raise_unexpected_basic_prefix ()
+          | Short ->
+            (match specs with
+             | Int -> signs, Short
+             | _ -> raise_unexpected_basic_prefix ())
+          | Long ->
+            (match specs with
+             | Int -> signs, Long
+             | Long -> signs, Long_long
+             | _ -> raise_unexpected_basic_prefix ())
+          | Signed ->
+            (match signs with
+             | None -> Some Signed, specs
+             | Some _ -> raise_unexpected_basic_prefix ())
+          | Unsigned ->
+            (match signs with
+             | None -> Some Unsigned, specs
+             | Some _ -> raise_unexpected_basic_prefix ())
+        in
+        keep_parsing_basic rest result
+      | rest -> Specs.Basic (signs, specs), rest
+    ;;
+
+    let rec parse context ~(tokens_rev : Token.t list) =
+      let unexpected_in_context () =
+        raise_s
+          [%message
+            "Unexpected in context"
+              (List.hd tokens_rev : Token.t option)
+              (context
+                : [ `Type of Specs.t
+                  | `Building_args of Specs.t list
+                  | `Building_type_params of Specs.t list
+                  | `Apply_next of _
+                  | `Built_args of Specs.t list
+                  | `Built_type_params of Specs.t list
+                  | `Function_or_block of Specs.t list
+                  ]
+                  list)]
+      in
+      (* Only call when needed *)
+      let rec reduce context =
+        match context with
+        | `Type ty :: `Apply_next f :: rest -> `Type (f ty) :: rest |> reduce
+        | `Type ty :: `Built_type_params parameters :: rest ->
+          let name =
+            match ty with
+            | Specs.Named name -> name
+            | ty ->
+              raise_s
+                [%message
+                  "Only simple named types can have type paramaeters" (ty : Specs.t)]
+          in
+          `Type (Specs.type_params ~name ~parameters) :: rest |> reduce
+        | `Type _
+          :: ( `Building_args _
+             | `Type _
+             | `Building_type_params _
+             | `Built_args _
+             | `Function_or_block _ )
+          :: _
+        | `Type _ :: _ -> context
+        | `Apply_next f :: `Apply_next g :: context ->
+          `Apply_next (Fn.compose f g) :: context |> reduce
+        | ( `Building_args _
+          | `Apply_next _
+          | `Building_type_params _
+          | `Built_args _
+          | `Function_or_block _
+          | `Built_type_params _ )
+          :: _
+        | [] -> context
+      in
+      let modify_last_type ~f =
+        match reduce context with
+        | `Type ty :: rest -> `Type (f ty) :: rest
+        | `Apply_next apply_next :: rest ->
+          `Apply_next (fun (ty : Specs.t) -> apply_next ty |> f) :: rest
+        | _ -> unexpected_in_context ()
+      in
+      let schedule_apply f = `Apply_next f :: context in
+      let add_type ty =
+        match context with
+        | `Apply_next f :: rest -> `Type (f ty) :: rest
+        | context -> `Type ty :: context
+      in
+      let make_function_apply_next ~creator rest =
+        let context =
+          match reduce context with
+          | `Apply_next f :: `Function_or_block arguments :: context ->
+            `Apply_next (fun return_type -> creator ~return_type ~arguments |> f)
+            :: context
+          | `Function_or_block arguments :: context ->
+            `Apply_next (fun return_type -> creator ~return_type ~arguments) :: context
+          | _ -> unexpected_in_context ()
+        in
+        parse context ~tokens_rev:rest
+      in
+      match tokens_rev with
+      | [] ->
+        (match reduce context with
+         | [ `Type ty ] -> ty
+         | _ -> unexpected_in_context ())
+      | Void :: rest -> parse (add_type Void) ~tokens_rev:rest
+      | Instance_type :: rest -> parse (add_type Instance_type) ~tokens_rev:rest
+      | Named name :: Struct :: rest -> parse (add_type (Struct name)) ~tokens_rev:rest
+      | Named name :: Enum :: rest -> parse (add_type (Enum name)) ~tokens_rev:rest
+      | (Struct | Enum) :: _ -> unexpected_in_context ()
+      | Named name :: rest -> parse (add_type (Named name)) ~tokens_rev:rest
+      | Availability _ :: _ -> unexpected_in_context ()
+      | Basic start :: rest ->
+        let type_, rest = basic_of_last_token start |> keep_parsing_basic rest in
+        parse (add_type type_) ~tokens_rev:rest
+      | Const :: rest -> parse (modify_last_type ~f:Specs.const) ~tokens_rev:rest
+      | Caret :: Open_paren :: rest -> make_function_apply_next ~creator:Specs.block rest
+      | Caret :: _ -> unexpected_in_context ()
+      | Star :: Open_paren :: rest ->
+        make_function_apply_next ~creator:Specs.function_pointer rest
+      | Star :: rest -> parse (schedule_apply Specs.pointer) ~tokens_rev:rest
+      | Nonnull :: rest ->
+        parse
+          (schedule_apply (fun ty -> Specs.nullability ~nullable:(Some false) ~ty))
+          ~tokens_rev:rest
+      | Nullable :: rest ->
+        parse
+          (schedule_apply (fun ty -> Specs.nullability ~nullable:(Some true) ~ty))
+          ~tokens_rev:rest
+      | Null_unspecified :: rest ->
+        parse
+          (schedule_apply (fun ty -> Specs.nullability ~nullable:None ~ty))
+          ~tokens_rev:rest
+      | Nullable_result :: rest ->
+        parse (schedule_apply Specs.nullable_result) ~tokens_rev:rest
+      | Kind_of :: rest -> parse (modify_last_type ~f:Specs.kind_of) ~tokens_rev:rest
+      | Swift_ui_actor :: rest ->
+        parse (modify_last_type ~f:Specs.swift_ui_actor) ~tokens_rev:rest
+      | Refined_for_swift :: rest ->
+        parse (modify_last_type ~f:Specs.refined_for_swift) ~tokens_rev:rest
+      | Returns_inner_pointer :: rest ->
+        parse (modify_last_type ~f:Specs.returns_inner_pointer) ~tokens_rev:rest
+      | Returns_not_retained :: rest ->
+        parse (modify_last_type ~f:Specs.returns_not_retained) ~tokens_rev:rest
+      | NS_unavailable :: rest ->
+        parse (modify_last_type ~f:Specs.ns_unavailable) ~tokens_rev:rest
+      | TVOS_prohibited :: rest ->
+        parse (modify_last_type ~f:(Specs.prohibited `TVOS)) ~tokens_rev:rest
+      | Comma :: rest ->
+        let context =
+          match reduce context with
+          | `Type ty :: `Building_args args :: context ->
+            `Building_args (ty :: args) :: context
+          | `Type ty :: `Building_type_params args :: context ->
+            `Building_type_params (ty :: args) :: context
+          | _ -> unexpected_in_context ()
+        in
+        parse context ~tokens_rev:rest
+      | Close_bracket :: rest ->
+        parse (`Building_type_params [] :: context) ~tokens_rev:rest
+      | Open_bracket :: rest ->
+        (match reduce context with
+         | `Type ty :: `Building_type_params params :: context ->
+           parse (`Built_type_params (ty :: params) :: context) ~tokens_rev:rest
+         | _ -> unexpected_in_context ())
+      | Close_paren :: rest ->
+        let context =
+          match reduce context with
+          | `Built_args args :: context -> `Function_or_block args :: context
+          | context -> `Building_args [] :: context
+        in
+        parse context ~tokens_rev:rest
+      | Open_paren :: rest ->
+        (match reduce context with
+         | `Type ty :: `Building_args args :: context ->
+           parse (`Built_args (ty :: args) :: context) ~tokens_rev:rest
+         | _ -> unexpected_in_context ())
+    ;;
+
+    let availability_and_specs_of_tokens = function
+      | Token.Availability availability :: rest ->
+        Some availability, parse [] ~tokens_rev:(List.rev rest)
+      | tokens -> None, parse [] ~tokens_rev:(List.rev tokens)
+    ;;
+
+    let parse original =
+      let tokens = Token.parse original in
+      let availability, specs = availability_and_specs_of_tokens tokens in
+      { original; tokens = Token.parse original; specs; availability }
+    ;;
   end
 
   type t =
