@@ -1,6 +1,6 @@
 (library
  (name autobindgen)
- (libraries core angstrom)
+ (libraries core angstrom csv ctypes)
  (inline_tests)
  (preprocess
   (pps ppx_yojson_conv ppx_jane)))

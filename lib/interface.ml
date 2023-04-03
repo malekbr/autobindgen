@@ -272,7 +272,7 @@ module Type = struct
       | Const of t
       | Pointer of t
       | Nullability of
-          { nullable : bool option (* Change option to unspecified *)
+          { nullable : [ `Nullable | `Nonnull | `Unspecified ]
           ; ty : t
           }
       | Nullable_result of t
@@ -309,7 +309,7 @@ module Type = struct
       ; specs : Specs.t
       ; availability : Availability.t option [@sexp.option]
       }
-    [@@deriving sexp_of, compare]
+    [@@deriving sexp_of, compare, fields]
 
     let basic_of_last_token : Token.Basic.t -> Specs.Signedness.t option * Specs.Basic.t
       = function
@@ -458,15 +458,15 @@ module Type = struct
       | Star :: rest -> parse (schedule_apply Specs.pointer) ~tokens_rev:rest
       | Nonnull :: rest ->
         parse
-          (schedule_apply (fun ty -> Specs.nullability ~nullable:(Some false) ~ty))
+          (schedule_apply (fun ty -> Specs.nullability ~nullable:`Nonnull ~ty))
           ~tokens_rev:rest
       | Nullable :: rest ->
         parse
-          (schedule_apply (fun ty -> Specs.nullability ~nullable:(Some true) ~ty))
+          (schedule_apply (fun ty -> Specs.nullability ~nullable:`Nullable ~ty))
           ~tokens_rev:rest
       | Null_unspecified :: rest ->
         parse
-          (schedule_apply (fun ty -> Specs.nullability ~nullable:None ~ty))
+          (schedule_apply (fun ty -> Specs.nullability ~nullable:`Unspecified ~ty))
           ~tokens_rev:rest
       | Nullable_result :: rest ->
         parse (schedule_apply Specs.nullable_result) ~tokens_rev:rest
@@ -594,6 +594,8 @@ module Property = struct
     }
   [@@deriving sexp_of, compare]
 
+  let fold_types t ~init ~f = f init t.type_
+
   let parse =
     let parser =
       let%map_open.Ast.Parser name = field name
@@ -667,6 +669,8 @@ module Type_parameter = struct
     in
     Ast.Parser.collect_exn parser ~type_:"Method.Type_parameter"
   ;;
+
+  let fold_types t ~init ~f = f init t.type_
 end
 
 module Method = struct
@@ -698,6 +702,8 @@ module Method = struct
       ; attributes : Attribute.t list [@sexp.list]
       }
     [@@deriving sexp_of, compare]
+
+    let fold_types t ~init ~f = f init t.type_
 
     let parse =
       let parser =
@@ -763,6 +769,19 @@ module Method = struct
           | SwiftPrivateAttr ) -> None
       | kind -> raise_s [%message "Unrecognized attribute" (kind : Ast.Kind.t option)]
     ;;
+
+    let fold_types (t : t) ~init ~f =
+      match t with
+      | `Initializer
+      | `Deprecated
+      | `Unavailable
+      | `Format_arg
+      | `Format
+      | `Retained
+      | `Not_retained -> init
+      | `Parameter param -> Parameter.fold_types param ~init ~f
+      | `Type_parameter param -> Type_parameter.fold_types param ~init ~f
+    ;;
   end
 
   type t =
@@ -774,6 +793,11 @@ module Method = struct
     ; variadic : bool option [@sexp.option]
     }
   [@@deriving sexp_of, compare]
+
+  let fold_types t ~init ~f =
+    let init = f init t.return_type in
+    List.fold t.attributes ~init ~f:(fun init attr -> Attribute.fold_types ~init ~f attr)
+  ;;
 
   let parse =
     let parser =
@@ -811,6 +835,8 @@ module Exception = struct
     in
     Ast.Parser.collect_exn parser ~type_:"Exception"
   ;;
+
+  let fold_types (_ : t) ~init ~f:_ = init
 end
 
 module Class_protocol_content = struct
@@ -843,6 +869,14 @@ module Class_protocol_content = struct
       | Some ObjCTypeParamDecl -> `Type_parameter (Type_parameter.parse t) |> Some
       | Some ObjCExceptionAttr -> `Exception (Exception.parse t) |> Some
       | kind -> raise_s [%message "Unknown kind" (kind : Ast.Kind.t option) (t : Ast.t)])
+  ;;
+
+  let fold_types (t : t) ~init ~f =
+    match t with
+    | `Property property -> Property.fold_types ~init ~f property
+    | `Method method_ -> Method.fold_types ~init ~f method_
+    | `Type_parameter type_parameter -> Type_parameter.fold_types ~init ~f type_parameter
+    | `Exception exn -> Exception.fold_types ~init ~f exn
   ;;
 end
 
@@ -889,6 +923,11 @@ module Protocol = struct
       }
     in
     Ast.Parser.collect_exn parser ~type_:"Protocol"
+  ;;
+
+  let fold_types t ~init ~f =
+    List.fold t.contents ~init ~f:(fun init v ->
+      Class_protocol_content.fold_types ~init ~f v)
   ;;
 end
 
@@ -947,6 +986,11 @@ module Class = struct
     in
     Ast.Parser.collect_exn parser ~type_:"Class"
   ;;
+
+  let fold_types t ~init ~f =
+    List.fold t.contents ~init ~f:(fun init v ->
+      Class_protocol_content.fold_types ~init ~f v)
+  ;;
 end
 
 module Enum = struct
@@ -983,6 +1027,13 @@ module Enum = struct
     ; fixed_underlying_type : Type.t option
     }
   [@@deriving sexp_of, compare]
+
+  let fold_types t ~init ~f =
+    let init = Option.fold t.fixed_underlying_type ~f ~init in
+    List.fold t.contents ~init ~f:(fun init -> function
+      | `Flag_enum -> init
+      | `Value { name = _; type_; is_referenced = _ } -> f init type_)
+  ;;
 
   let parse =
     let parser =
@@ -1024,24 +1075,68 @@ module Enum = struct
   ;;
 end
 
-let run (ast : Ast.t) =
-  let classes =
-    List.filter_map (Option.value ~default:[] ast.inner) ~f:(fun ast ->
-      match ast.kind with
-      | Some ObjCInterfaceDecl -> `Class (Class.parse ast) |> Some
-      | Some ObjCProtocolDecl -> `Protocol (Protocol.parse ast) |> Some
-      | Some EnumDecl -> Enum.parse ast |> Option.map ~f:(fun enum -> `Enum enum)
-      | _ -> None)
-  in
-  (* TODO protocols *)
-  classes
-  |> [%sexp_of: [ `Class of Class.t | `Protocol of Protocol.t | `Enum of Enum.t ] list]
-  |> print_s
+type t =
+  | Class of Class.t
+  | Protocol of Protocol.t
+  | Enum of Enum.t
+[@@deriving sexp_of, compare, variants]
+
+let fold_types t ~init ~f =
+  match t with
+  | Class class_ -> Class.fold_types class_ ~init ~f
+  | Protocol protocol -> Protocol.fold_types protocol ~init ~f
+  | Enum enum -> Enum.fold_types enum ~init ~f
+;;
+
+let parse_top_level_ast (ast : Ast.t) =
+  List.filter_map (Option.value ~default:[] ast.inner) ~f:(fun ast ->
+    match ast.kind with
+    | Some ObjCInterfaceDecl -> Class (Class.parse ast) |> Some
+    | Some ObjCProtocolDecl -> Protocol (Protocol.parse ast) |> Some
+    | Some EnumDecl -> Enum.parse ast |> Option.map ~f:(fun enum -> Enum enum)
+    | _ -> None)
+;;
+
+let collect_all_types ts =
+  List.fold ts ~init:[] ~f:(fun init t ->
+    fold_types t ~init ~f:(fun types ty -> ty :: types))
+;;
+
+let run (ast : Ast.t) ~action =
+  let ts = parse_top_level_ast ast in
+  match action with
+  | `Dump -> print_s [%sexp (ts : t list)]
+  | `List_types ->
+    let csv_columns =
+      [ Csv_printer.column "Type" Type.Parsed.original
+      ; Csv_printer.sexpable
+          "Parsed"
+          (Fn.compose [%sexp_of: Type.Specs.t] Type.Parsed.specs)
+      ; Csv_printer.sexpable
+          "Availability"
+          (Fn.compose [%sexp_of: Type.Availability.t option] Type.Parsed.availability)
+      ; Csv_printer.sexpable
+          "Tokens"
+          (Fn.compose [%sexp_of: Type.Token.t list] Type.Parsed.tokens)
+      ]
+    in
+    collect_all_types ts
+    |> List.concat_map ~f:(fun t ->
+         List.filter_opt [ t.desugared_type; Some t.specified_type ])
+    |> Csv_printer.to_csv csv_columns
+    |> Csv.output_all (Csv.to_channel Out_channel.stdout)
 ;;
 
 let command =
   Command.basic ~summary:""
   @@
-  let%map_open.Command file = anon ("file" %: string) in
-  fun () -> Ast.load_exn ~file |> run
+  let%map_open.Command file = anon ("file" %: string)
+  and action =
+    choose_one
+      [ flag "dump" (no_arg_some `Dump) ~doc:" dump parsed AST"
+      ; flag "list-types" (no_arg_some `List_types) ~doc:" list parsed types"
+      ]
+      ~if_nothing_chosen:Raise
+  in
+  fun () -> Ast.load_exn ~file |> run ~action
 ;;
